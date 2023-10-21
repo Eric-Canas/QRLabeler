@@ -53,7 +53,8 @@ class DatasetParser:
         with open(temp_file, 'w') as f:
             for element in self.discarded_elements:
                 f.write(f"{element}\n")
-        os.remove(self.discarded_txt)
+        if os.path.isfile(self.discarded_txt):
+            os.remove(self.discarded_txt)
         os.rename(temp_file, self.discarded_txt)
 
 
@@ -166,7 +167,7 @@ class DatasetParser:
                 if new_polygon is None:
                     to_discard = True
                     break
-                new_polygon = sort_corners(corners=new_polygon)
+                #new_polygon = sort_corners(corners=new_polygon)
                 reconstructed_polygons.append(new_polygon)
             if to_discard:
                 logger.warning(f"Image {image_name_without_extension} discarded because of an invalid polygon")
@@ -174,8 +175,9 @@ class DatasetParser:
                 if len(self.discarded_elements) % 2 == 0:
                     self._write_discarded_elements()
                 return False
-            polygons = np.array(reconstructed_polygons, dtype=np.float32)
-
+            polygons = reconstructed_polygons
+        if is_empty:
+            polygons = []
         # Save the image and label
         self.write_output(image_path=image_path, polygons=polygons, entry_name=image_name_without_extension,
                           set_name=set_name)
@@ -238,9 +240,8 @@ class DatasetParser:
         :return: image with overlayed polygons in RGB format
         """
         assert os.path.isfile(image_path), f"Image {image_path} does not exist"
-        assert len(polygons) == 0 or polygons.shape[1:] == (4, 2), f"Polygons must be in the format (n, 4, 2)"
-        assert len(polygons) == 0 or (np.max(polygons) >= 0. and np.max(
-            polygons) <= 1.), f"Polygons must be in normalized coordinates (0. to 1.)"
+        assert len(polygons) == 0 or all(np.max(polygon) >= 0. and np.max(polygon) <= 1. for polygon in polygons),\
+            f"Polygons must be in normalized coordinates (0. to 1.)"
 
         image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
         height, width = image.shape[:2]
@@ -268,7 +269,7 @@ class DatasetParser:
 
         # Save the image to the new location
         output_image_path = os.path.join(images_dir, f"{entry_name}.jpg")
-        cv2.imwrite(output_image_path, cv2.cvtColor(overlay_image, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(output_image_path, cv2.imread(image_path))
 
         # Write the polygons to a txt file
         output_label_path = os.path.join(labels_dir, f"{entry_name}.txt")

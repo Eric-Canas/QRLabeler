@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import shutil
 
 import cv2
+from qrdet import PADDED_QUAD_XYN, POLYGON_XYN, QUAD_XYN
 from scipy.spatial import ConvexHull
 import numpy as np
 from pyzbar.pyzbar import decode, ZBarSymbol
+from loguru import logger
 
 from utils import sort_corners, select_polygon_corners
-
+from qreader import QReader
 
 class DetectionImprovement:
+
+    def __init__(self):
+        self.qreader = QReader()
+
     @staticmethod
     def get_polygon_from_opencv(image, current_polygon: np.ndarray):
         # Calculate center of the current_polygon
@@ -41,6 +46,7 @@ class DetectionImprovement:
 
         if closest_bbox is not None:
             assert closest_bbox.shape == (4, 2), "The bbox must have 4 corners"
+            closest_bbox = np.clip(closest_bbox, a_min=0., a_max=1.)
             return closest_bbox
 
         # If OpenCV detection fails, fall back to Pyzbar
@@ -63,6 +69,7 @@ class DetectionImprovement:
                 min_distance, closest_bbox = distance, bbox
         assert len(closest_bbox) == 1, "There should be only one QR code"
         closest_bbox = closest_bbox[0]
+        closest_bbox = np.clip(closest_bbox, a_min=0., a_max=1.)
         assert closest_bbox.shape == (4, 2), "The bbox must have 4 corners"
         return closest_bbox
 
@@ -80,31 +87,47 @@ class DetectionImprovement:
         :return: None|np.ndarray. If the polygon is valid, return the corners. If not, return None.
         """
         last_correct_corners = None
-
-        if is_bbox:
-            assert current_polygon.shape == (4, 2), "The bbox must have 4 corners"
-            corners = current_polygon
-        elif current_polygon is not None:
-            corners = self._build_romboid_from_polygon(current_polygon=current_polygon)
+        corners = current_polygon
+        if current_polygon is not None:
             last_correct_corners = corners
-            title = "From Polygon" if remaining_polygons == 0 else f"From Polygon ({remaining_polygons} remaining)"
-            accepted, are_more = self.ask_user(image=image, corners=corners, title=title)
+            accepted, are_more = self.ask_user(image=image, corners=corners, title="From Label",
+                                                  remaining_polygons=remaining_polygons)
             if accepted:
                 return corners, are_more
         else:
             corners = None
+
+        # First, try OpenCV. Doesn't always work, but when it does, it is very accurate
         corners = self.get_polygon_from_opencv(image, current_polygon=corners)
+
         if corners is not None:
             last_correct_corners = corners
-            title = "From OpenCV" if remaining_polygons == 0 else f"From OpenCV ({remaining_polygons} remaining)"
-            accepted, are_more = self.ask_user(image=image, corners=corners, title=title)
+            accepted, are_more = self.ask_user(image=image, corners=corners, title="From OpenCV",
+                                               remaining_polygons=remaining_polygons)
             if accepted:
                 return corners, are_more
 
+        # Then try with QRDet
+        decodes, dets = self.qreader.detect_and_decode(image=image, return_detections=True)
+        if len(dets) > 0:
+            for i, (det, decode) in enumerate(zip(dets, decodes)):
+                print("Decoding:", decode)
+                for corners, title in zip((det[POLYGON_XYN], det[QUAD_XYN], det[PADDED_QUAD_XYN]),
+                                          ("QRDet (Full Polygon)", "QRDet (Quadrilateral)", "QRDet (Expanded Quadrilateral)")):
+                    if decode is None:
+                        title += " [Not decoded]"
+                    if len(dets) > 1:
+                        title += f" [Checking {i+1}/{len(dets)}]"
+                    accepted, are_more = self.ask_user(image=image, corners=corners, title=title,
+                                                       remaining_polygons=remaining_polygons)
+                    if accepted:
+                        return corners, are_more
+
+        # If nothing worked, ask the user to select the corners
         corners = select_polygon_corners(image=image, prev_corners=last_correct_corners)
         if corners is not None:
-            title = "Your selection" if remaining_polygons == 0 else f"Your selection ({remaining_polygons} remaining)"
-            accepted, are_more = self.ask_user(image=image, corners=corners, title=title)
+            accepted, are_more = self.ask_user(image=image, corners=corners, title="Your selection",
+                                               remaining_polygons=remaining_polygons)
             if accepted:
                 return corners, are_more
 
@@ -167,18 +190,25 @@ class DetectionImprovement:
         return corners
 
     @staticmethod
-    def ask_user(image: np.ndarray, corners: np.ndarray, title: str = "") -> bool:
+    def ask_user(image: np.ndarray, corners: np.ndarray, title: str = "", remaining_polygons: int = 0) -> bool:
         """
         Asks the user if the polygon is valid by showing the corners on the image.
         Awaits a key press to determine the user's response.
 
         :param image: np.ndarray. Image to be displayed
         :param corners: np.ndarray. Corners of the polygon to be displayed
+        :param title: str. Title of the image window
+        :param remaining_polygons: int. Number of remaining polygons to be checked (just for the title)
         :return: bool. True if the polygon is accepted by the user, False otherwise
         """
 
+        if remaining_polygons > 0:
+            title += f" ({remaining_polygons} remaining)"
+        if np.min(corners) < 0. or np.max(corners) > 1.:
+            logger.warning("Don't wanna save a polygon with corners outside the image")
+            return False, False
         # Sort and scale corners
-        corners = sort_corners(corners=corners)
+        #corners = sort_corners(corners=corners)
         corners = (corners * (image.shape[1], image.shape[0])).astype(np.int32)
 
         # Plot corners on the image
